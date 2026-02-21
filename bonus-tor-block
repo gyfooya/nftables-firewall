@@ -1,0 +1,46 @@
+#!/bin/bash
+
+# Nom du fichier temporaire
+TMP_FILE="/tmp/tor_exit_addresses.txt"
+
+# Récupère la liste officielle Tor exit nodes
+curl -s https://check.torproject.org/exit-addresses > $TMP_FILE
+
+# Crée les fichiers pour IPv4 et IPv6
+TOR_IPV4=$(mktemp)
+TOR_IPV6=$(mktemp)
+
+grep ExitAddress $TMP_FILE | awk '{print $2}' | grep -v ':' > $TOR_IPV4
+grep ExitAddress $TMP_FILE | awk '{print $2}' | grep ':' > $TOR_IPV6
+
+# Crée les sets nftables si n'existent pas
+nft list set inet filter tor_ipv4 &>/dev/null || \
+nft add set inet filter tor_ipv4 { type ipv4_addr; flags interval; }
+
+nft list set inet filter tor_ipv6 &>/dev/null || \
+nft add set inet filter tor_ipv6 { type ipv6_addr; flags interval; }
+
+# Vide les sets existants
+nft flush set inet filter tor_ipv4
+nft flush set inet filter tor_ipv6
+
+# Ajoute les IP Tor dans les sets
+for ip in $(cat $TOR_IPV4); do
+    nft add element inet filter tor_ipv4 { $ip }
+done
+
+for ip in $(cat $TOR_IPV6); do
+    nft add element inet filter tor_ipv6 { $ip }
+done
+
+# Ajoute les règles pour bloquer si elles n'existent pas
+nft list chain inet filter input | grep -q 'tor_ipv4' || \
+nft add rule inet filter input ip saddr @tor_ipv4 drop
+
+nft list chain inet filter input | grep -q 'tor_ipv6' || \
+nft add rule inet filter input ip6 saddr @tor_ipv6 drop
+
+echo "Tor exit nodes bloqués avec nftables !"
+
+# Nettoyage
+rm $TOR_IPV4 $TOR_IPV6
