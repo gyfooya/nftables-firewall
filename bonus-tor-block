@@ -1,46 +1,54 @@
 #!/bin/bash
+# ADVANCED TOR BLOCKER
 
-# Nom du fichier temporaire
+
+# Fichier temporaire
 TMP_FILE="/tmp/tor_exit_addresses.txt"
 
 # Récupère la liste officielle Tor exit nodes
 curl -s https://check.torproject.org/exit-addresses > $TMP_FILE
 
-# Crée les fichiers pour IPv4 et IPv6
-TOR_IPV4=$(mktemp)
-TOR_IPV6=$(mktemp)
+# Sépare IPv4 et IPv6
+NEW_IPV4=$(grep ExitAddress $TMP_FILE | awk '{print $2}' | grep -v ':')
+NEW_IPV6=$(grep ExitAddress $TMP_FILE | awk '{print $2}' | grep ':')
 
-grep ExitAddress $TMP_FILE | awk '{print $2}' | grep -v ':' > $TOR_IPV4
-grep ExitAddress $TMP_FILE | awk '{print $2}' | grep ':' > $TOR_IPV6
-
-# Crée les sets nftables si n'existent pas
+# Crée les sets si nécessaire
 nft list set inet filter tor_ipv4 &>/dev/null || \
 nft add set inet filter tor_ipv4 { type ipv4_addr; flags interval; }
-
 nft list set inet filter tor_ipv6 &>/dev/null || \
 nft add set inet filter tor_ipv6 { type ipv6_addr; flags interval; }
 
-# Vide les sets existants
-nft flush set inet filter tor_ipv4
-nft flush set inet filter tor_ipv6
+# Fonction pour synchroniser un set nftables avec une nouvelle liste
+sync_nft_set() {
+    local SET_NAME=$1
+    local NEW_LIST="$2"
 
-# Ajoute les IP Tor dans les sets
-for ip in $(cat $TOR_IPV4); do
-    nft add element inet filter tor_ipv4 { $ip }
-done
+    # Récupère les IP existantes dans le set
+    EXISTING=$(nft list set inet filter $SET_NAME | grep -Eo '([0-9a-fA-F:.]+)' || true)
 
-for ip in $(cat $TOR_IPV6); do
-    nft add element inet filter tor_ipv6 { $ip }
-done
+    # Ajouter les IP qui ne sont pas encore dans le set
+    for ip in $NEW_LIST; do
+        if ! grep -qx "$ip" <<< "$EXISTING"; then
+            nft add element inet filter $SET_NAME { $ip }
+        fi
+    done
 
-# Ajoute les règles pour bloquer si elles n'existent pas
+    # Supprimer les IP qui ne sont plus dans la nouvelle liste
+    for ip in $EXISTING; do
+        if ! grep -qx "$ip" <<< "$NEW_LIST"; then
+            nft delete element inet filter $SET_NAME { $ip }
+        fi
+    done
+}
+
+# Synchronisation des sets
+sync_nft_set tor_ipv4 "$NEW_IPV4"
+sync_nft_set tor_ipv6 "$NEW_IPV6"
+
+# Ajoute les règles de blocage si elles n'existent pas
 nft list chain inet filter input | grep -q 'tor_ipv4' || \
 nft add rule inet filter input ip saddr @tor_ipv4 drop
-
 nft list chain inet filter input | grep -q 'tor_ipv6' || \
 nft add rule inet filter input ip6 saddr @tor_ipv6 drop
 
-echo "Tor exit nodes bloqués avec nftables !"
-
-# Nettoyage
-rm $TOR_IPV4 $TOR_IPV6
+echo "Tor exit nodes synchronisés et bloqués !"
